@@ -17,9 +17,10 @@ cursor = db.cursor()
 ### This is just for debugging...returns a sampe set of data (my time-ordered listening history)
 ### But the format should stay the change. Code below assumes input is in the form of tuples:
 ###       ((artist_id_1,artist_name_1),(artist_id_2,artist_name_2),...,(artist_id_b,artist_name_n))
-cursor.execute("select s.artist_id,i.artist from lastfm_scrobbles s join lastfm_itemlist i on s.artist_id=i.item_id where \
-				user_id = (select user_id from lastfm_users where user_name='AxelStreichen') order by scrobble_time asc")
-testData = cursor.fetchall()
+
+#cursor.execute("select s.artist_id,i.artist from lastfm_scrobbles s join lastfm_itemlist i on s.artist_id=i.item_id where \
+#				user_id = (select user_id from lastfm_users where user_name='AxelStreichen') order by scrobble_time asc")
+#testData = cursor.fetchall()
 
 
 """
@@ -99,33 +100,60 @@ Processes a listening time series retrieved from database, represented as a tupl
 	((artist_id_1,artist_name_1),(artist_id_2,artist_name_2),...,(artist_id_b,artist_name_n))
 Returns list of artist similarities of length n-1, where n is the length of the time series.
 """
-def process_artist_seq(seq):
+def process_artist_seq(seq,verbose=False):
 	#start = time.time()
 	sims = []
 	last_id = seq[0][0]
 	last_name = seq[0][1].replace('+',' ')
 	#for i,(artist_id,artist_name) in enumerate(seq[1:]):
-	for artist_id,artist_name in seq[1:]:
+	for artist_id,artist_name,ts in seq[1:]:
 		artist_name = unquote(artist_name).replace('+',' ')
 		if artist_id == last_id:
 			sim = 1.0
 		else:
 			# THIS TRY/EXCEPT BLOCK IS FOR DEBUGGING ONLY
-			try:
-				sim = get_sim(artist_id,artist_name,last_id,last_name)
-			except: 
-				print artist_id,artist_name,last_id,last_name
-				return artist_id,artist_name,last_id,last_name
+			#try:
+			sim = get_sim(artist_id,artist_name,last_id,last_name)
+			#except: 
+			#	print artist_id,artist_name,last_id,last_name
+			#	return artist_id,artist_name,last_id,last_name
 		sims.append(sim)
-		print artist_id,artist_name,last_id,last_name,sim
+		if verbose:
+			print artist_id,artist_name,last_id,last_name,sim
 		last_id = artist_id
 		last_name = artist_name
 	return sims
 
+"""
+Simple, temporary function to handle writing output to file
+"""
 
-#print len(testData)
-#artist_id,artist_name,last_id,last_name = process_artist_seq(testData)
+def output_handler(user,listening_seq,sim_seq,fi,filemode):
+	out = open(fi,filemode)
+	for (artist_id,artist_name,ts),sim in zip(listening_seq,[None]+sim_seq):
+		out.write('\t'.join(map(str,[user,artist_id,artist_name,ts,sim]))+'\n')
+	out.close()
 
+
+###
+# Block to generate sample data
+###
+cursor.execute("select user_id from lastfm_users where sample_playcount>=10000 limit 25;")
+users = cursor.fetchall()
+for i,user in enumerate(users):
+	print i,user[0]
+	cursor.execute("select s.artist_id,i.artist,s.scrobble_time from lastfm_scrobbles s join lastfm_itemlist i on s.artist_id=i.item_id where \
+				user_id = %s order by scrobble_time asc", (user[0],))
+	result = cursor.fetchall()
+	sims = process_artist_seq(result)
+	fi = '25_sample_users_for_ke.tsv'
+	if i==0:
+		output_handler(user[0],result,sims,fi,'w')
+	else:
+		output_handler(user[0],result,sims,fi,'a')
+
+cursor.close()
+db.close()
 
 
 
