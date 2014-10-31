@@ -3,24 +3,12 @@ from pyechonest import config
 from pyechonest.artist import Artist
 from pyechonest.util import EchoNestAPIError
 from urllib2 import unquote
+import socket
 import time
 import MySQLdb
-
-
-config.ECHO_NEST_API_KEY=open('api.key').read()
-mysql_user,mysql_pass = [line.strip() for line in open('mysql.key')]
-
-db = MySQLdb.connect(host="127.0.0.1", user=mysql_user, passwd=mysql_pass,db="analysis_lastfm")
-cursor = db.cursor()
-
-
-### This is just for debugging...returns a sampe set of data (my time-ordered listening history)
-### But the format should stay the change. Code below assumes input is in the form of tuples:
-###       ((artist_id_1,artist_name_1),(artist_id_2,artist_name_2),...,(artist_id_b,artist_name_n))
-
-#cursor.execute("select s.artist_id,i.artist from lastfm_scrobbles s join lastfm_itemlist i on s.artist_id=i.item_id where \
-#				user_id = (select user_id from lastfm_users where user_name='AxelStreichen') order by scrobble_time asc")
-#testData = cursor.fetchall()
+import itertools
+import multiprocessing as mp
+import math
 
 
 """
@@ -46,6 +34,8 @@ def echonest_terms(artist):
 			# Any other error, raise the exception
 			else:
 				raise error
+		except socket.error:
+			time.sleep(5)
 
 
 """
@@ -82,6 +72,8 @@ Get cosine similariy for a pair of artists.
 First tries pulling from database, otherwise calls term_cosine_sim
 """
 def get_sim(artist1_id,artist1_name,artist2_id,artist2_name):
+	if artist1_id==artist2_id:
+		return 1.0
 	if artist1_id>artist2_id:
 		artist1_id,artist2_id = artist2_id,artist1_id
 		artist1_name,artist2_name = artist2_name,artist1_name
@@ -95,11 +87,54 @@ def get_sim(artist1_id,artist1_name,artist2_id,artist2_name):
 		db.commit()
 		return sim
 
+
+if __name__ == '__main__':
+
+	config.ECHO_NEST_API_KEY=open('api.key').read()
+	mysql_user,mysql_pass = [line.strip() for line in open('mysql.key')]
+
+	out = open('sim_seqs.tsv','w')
+
+	db = MySQLdb.connect(host="127.0.0.1", user=mysql_user, passwd=mysql_pass,db="analysis_lastfm")
+	cursor = db.cursor()
+
+	nUsers = cursor.execute("select user_id from lastfm_users where sample_playcount>0;")
+	users = [_[0] for _ in cursor.fetchall()] 
+	nProc = mp.cpu_count()
+	for i,user in enumerate(users):
+		print '%s / %s' % (i+1,nUsers)
+		n=cursor.execute("select s.artist_id,i.artist from lastfm_scrobbles s join lastfm_itemlist i on s.artist_id=i.item_id where \
+				user_id = %s order by scrobble_time asc", (user,))
+		# if less than two listens, no similarities to calculate
+		if n<2:
+			continue
+		## Step 1: Make the input list into a list of pairs using itertools
+		a, b = itertools.tee(cursor)
+		_ = b.next()
+		# Returns 2-tuples like (cursor[0], cursor[1]), ... until cursor is exhausted
+		tuples = itertools.izip(a, b)
+		
+		chunksize = int(math.ceil(n / float(nProc)))
+		print n,chunksize
+		pool = mp.Pool(processes=nProc)
+		# Manually tune the chunksize here. It's the number of tuples read at one time
+		out.write(str(user))
+		for _ in pool.imap(func=get_sim, iterable=tuples, chunksize=chunksize):
+			out.write('\t'+str(_))
+		pool.close()
+		out.write('\n')
+	cursor.close()
+	db.close()
+
+
+
+###### EVERYTHING BELOW HERE IS JUNK
 """
-Processes a listening time series retrieved from database, represented as a tuple:
-	((artist_id_1,artist_name_1),(artist_id_2,artist_name_2),...,(artist_id_b,artist_name_n))
-Returns list of artist similarities of length n-1, where n is the length of the time series.
-"""
+
+#Processes a listening time series retrieved from database, represented as a tuple:
+#	((artist_id_1,artist_name_1),(artist_id_2,artist_name_2),...,(artist_id_b,artist_name_n))
+#Returns list of artist similarities of length n-1, where n is the length of the time series.
+
 def process_artist_seq(seq,verbose=False):
 	#start = time.time()
 	sims = []
@@ -124,36 +159,16 @@ def process_artist_seq(seq,verbose=False):
 		last_name = artist_name
 	return sims
 
-"""
-Simple, temporary function to handle writing output to file
-"""
+#Simple, temporary function to handle writing output to file
 
 def output_handler(user,listening_seq,sim_seq,fi,filemode):
 	out = open(fi,filemode)
 	for (artist_id,artist_name,ts),sim in zip(listening_seq,[None]+sim_seq):
 		out.write('\t'.join(map(str,[user,artist_id,artist_name,ts,sim]))+'\n')
 	out.close()
+"""
 
-
-###
-# Block to generate sample data
-###
-cursor.execute("select user_id from lastfm_users where sample_playcount>=10000 limit 25;")
-users = cursor.fetchall()
-for i,user in enumerate(users):
-	print i,user[0]
-	cursor.execute("select s.artist_id,i.artist,s.scrobble_time from lastfm_scrobbles s join lastfm_itemlist i on s.artist_id=i.item_id where \
-				user_id = %s order by scrobble_time asc", (user[0],))
-	result = cursor.fetchall()
-	sims = process_artist_seq(result)
-	fi = '25_sample_users_for_ke.tsv'
-	if i==0:
-		output_handler(user[0],result,sims,fi,'w')
-	else:
-		output_handler(user[0],result,sims,fi,'a')
-
-cursor.close()
-db.close()
-
+		
+	
 
 
