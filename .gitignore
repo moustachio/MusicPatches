@@ -1,6 +1,8 @@
 ### MANUALLY ADDED
 *.key
 data/*
+*.tsv
+*.csv
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
