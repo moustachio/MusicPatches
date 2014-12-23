@@ -2,6 +2,7 @@ from scipy.spatial.distance import cosine
 from pyechonest import config
 from pyechonest.artist import Artist
 from pyechonest.util import EchoNestAPIError,EchoNestIOError
+from httplib import BadStatusLine
 from urllib2 import unquote
 import socket
 import time
@@ -10,7 +11,12 @@ import itertools
 #import multiprocessing as mp
 import math
 
-
+import win32api
+import thread
+def handler(sig, hook=thread.interrupt_main):
+	hook()
+	return 1
+win32api.SetConsoleCtrlHandler(handler, 1)
 """
 Retrives terms from echonest API, given an artist names.
 Result is converted to dict in the form
@@ -31,13 +37,18 @@ def echonest_terms(artist):
 				return {}
 			# If we've exceeded the rate limit, wait 5 seconds and then try again
 			# EchoNestAPIError: (u'Echo Nest API Error 3: 3|You are limited to 120 accesses every minute. You might be eligible for a rate limit increase, go to http://developer.echonest.com/account/upgrade [HTTP 429]',)
-			elif http_status == 429:
+			elif http_status in [429,500,503]:
 				time.sleep(5)
 			# Any other error, raise the exception
 
 			else:
+				print artist
 				raise error
 		except socket.error:
+			print artist
+			time.sleep(5)
+		except BadStatusLine:
+			print artist
 			time.sleep(5)
 
 
@@ -63,7 +74,7 @@ If term vector is empty for an artist, return NULL
 def term_cosine_sim(artist1_id,artist1_name,artist2_id,artist2_name):
 	a1Terms = get_terms(artist1_id,artist1_name)
 	a2Terms = get_terms(artist2_id,artist2_name)
-	if (a1Terms == {}) or (a2Terms =={}):
+	if (a1Terms == {}) or (a2Terms == {}):
 		return None
 	union = set(a1Terms.keys()) | set(a2Terms.keys())
 	a1vec = [a1Terms.get(i,0.0) for i in union]
@@ -125,29 +136,86 @@ def output_handler(user,listening_seq,sim_seq,fi,filemode):
 		out.write('\t'.join(map(str,[user,artist_id,artist_name,ts,sim]))+'\n')
 	out.close()
 
+"""
+### BLOCK JUST FOR GETTING ARTIST TERMS
 
 config.ECHO_NEST_API_KEY=open('api.key').read()
 mysql_user,mysql_pass = [line.strip() for line in open('mysql.key')]
 
-out = open('sim_seqs.tsv','w')
 
 db = MySQLdb.connect(host="127.0.0.1", user=mysql_user, passwd=mysql_pass,db="analysis_lastfm")
 cursor = db.cursor()
 
-n = cursor.execute("select user_id from lastfm_users where sample_playcount>=100;")
+cursor = db.cursor()
+n = cursor.execute("select i.item_id,i.artist from echonest_terms e right outer join lastfm_itemlist i on e.artist_id=i.item_id where i.item_type=0 and e.artist_id is null;")
+result = cursor.fetchall()
+
+for i,(artist_id,artist_name) in enumerate(result):
+	if i %10000 == 0:
+		db.commit()
+	print '%s :: %s / %s (%s percent complete)' % (artist_name,i+1,n,(i+1.)/n)
+	artist_name = unquote(artist_name).replace('+',' ')
+	terms = echonest_terms(artist_name)
+	cursor.execute("insert into echonest_terms (artist_id,terms) values (%s,%s);", (artist_id,str(terms)))
+db.commit()
+db.close()
+"""
+
+### CURRENT FUNCTIONAL SIM_SEQ CODE
+
+config.ECHO_NEST_API_KEY=open('api.key').read()
+mysql_user,mysql_pass = [line.strip() for line in open('mysql.key')]
+
+fi = 'E:/BTSync/Research.Archive/LastFM/MusicPatches/simSeqs_backup2.tsv'
+out = open('E:/BTSync/Research.Archive/LastFM/MusicPatches/simSeqs.tsv','w')
+#try:
+infile = open(fi,'r')
+done = {}
+last = None
+for i,line in enumerate(infile):
+	if last:
+		out.write(last)
+		done[int(last.strip().split('\t')[0])] = None
+	last = line
+#out.write(last)
+#done[int(last.strip().split('\t')[0])] = None
+infile.close()
+
+#print len(done)
+#x=raw_input('ok to continue? (y or n)')
+#if x!='y':
+#	raise()
+
+#except:
+#	done = {}
+
+out.close()
+
+out = open('E:/BTSync/Research.Archive/LastFM/MusicPatches/simSeqs.tsv','a')
+
+
+db = MySQLdb.connect(host="127.0.0.1", user=mysql_user, passwd=mysql_pass,db="analysis_lastfm")
+cursor = db.cursor()
+
+n = cursor.execute("select user_id from lastfm_users where sample_playcount>=100 order by rand();")
 users = cursor.fetchall()
 
-
-fi = 'E:/BTSync/Research.Archive/LastFM/MusicPatches/simSeqs.tsv'
-out = open(fi,'w')
 for i,user in enumerate(users):
-	scrobbles = cursor.execute("select s.artist_id,i.artist,s.scrobble_time from lastfm_scrobbles s join lastfm_itemlist i on s.artist_id=i.item_id where \
-				user_id = %s order by scrobble_time asc", (user[0],))
-	#scrobbles = cursor.execute("select artist_id from lastfm_scrobbles where user_id=%s order by scrobble_time asc", (user[0],))
-	result = cursor.fetchall()
-	sims = process_artist_seq(result)
-	out.write('\t'.join(map(str,[user]+sims))+'\n')
-	print 'user %s (%s scrobbles)' % (user[0],scrobbles), '%s / %s' % (i+1,n), '%0.2f percent complete' % (100*((i+1.)/n))
+	user = user[0]
+	try:
+		if user in done:
+			continue
+			print 'user %s (already done)' % (user,), '%s / %s' % (i+1,n), '%0.2f percent complete' % (100*((i+1.)/n)), time.strftime("%d %b %Y %H:%M:%S", time.localtime())
+		scrobbles = cursor.execute("select s.artist_id,i.artist,s.scrobble_time from lastfm_scrobbles s join lastfm_itemlist i on s.artist_id=i.item_id where \
+					user_id = %s order by scrobble_time asc", (user,))
+		#scrobbles = cursor.execute("select artist_id from lastfm_scrobbles where user_id=%s order by scrobble_time asc", (user[0],))
+		result = cursor.fetchall()
+		sims = process_artist_seq(result)
+		out.write('\t'.join(map(str,[user]+sims))+'\n')
+		print 'user %s (%s scrobbles)' % (user,scrobbles), '%s / %s' % (i+1,n), '%0.2f percent complete' % (100*((i+1.)/n)), time.strftime("%d %b %Y %H:%M:%S", time.localtime())
+	except KeyboardInterrupt:
+		print 'Stopping...'
+		break
 	#if i==0:
 	#	output_handler(user[0],result,sims,fi,'w')
 	#else:
@@ -159,6 +227,8 @@ db.close()
 
 
 
+
+### ATTEMPT AT PARALLEL SHIT
 """
 if __name__ == '__main__':
 
